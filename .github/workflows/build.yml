@@ -1,0 +1,22 @@
+name: Windows Container CI
+
+on: [push]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-go@v5
+    - name: dowmload wails
+      uses: actions/checkout@v4
+      with:
+        repository: "wailsapp/wails"
+        ref: "v3-alpha"
+        path: ${{ github.workspace }}/wails
+    - name: install-wails
+      run: |
+        cd wails/v3/cmd/wails3
+        go install -v .
+        wails3 version
