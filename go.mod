@@ -1,4 +1,4 @@
-module changeme
+module www.zhao1012112796.top/a1012112796/dev-tools
 
 go 1.25.0
 
