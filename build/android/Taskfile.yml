@@ -7,12 +7,12 @@ vars:
   APP_ID: '{{.APP_ID | default "com.wails.app"}}'
   MIN_SDK: '21'
   TARGET_SDK: '34'
-  # The emulator runs the host architecture; physical devices are arm64
-  HOST_ARCH:
-    sh: '[ "$(uname -m)" = "x86_64" ] && echo "amd64" || echo "arm64"'
+  # The emulator runs the host architecture; physical devices are arm64.
+  # ARCH is go-task's built-in host GOARCH ("amd64"/"arm64") - no `uname` needed,
+  # so this resolves the same way on Windows, Linux and macOS.
+  HOST_ARCH: '{{if eq ARCH "arm64"}}arm64{{else}}amd64{{end}}'
   # System-image ABI for the host, used in the "create an AVD" hint below.
-  ANDROID_ABI:
-    sh: '[ "$(uname -m)" = "arm64" ] && echo "arm64-v8a" || echo "x86_64"'
+  ANDROID_ABI: '{{if eq ARCH "arm64"}}arm64-v8a{{else}}x86_64{{end}}'
   # SDK location: $ANDROID_HOME / $ANDROID_SDK_ROOT, else the per-OS default
   # (macOS: ~/Library/Android/sdk, Linux/other: ~/Android/Sdk)
   SDK_ROOT:
@@ -54,13 +54,24 @@ tasks:
 
   compile:go:shared:
     summary: Compile Go code to shared library (.so)
+    vars:
+      ARCH: '{{.ARCH | default .HOST_ARCH}}'
+      # Per-arch values derived with go-task templates so no shell tooling
+      # (uname/case) is required - works identically on Windows and Unix.
+      GOARCH: '{{if eq .ARCH "arm64"}}arm64{{else}}amd64{{end}}'
+      JNI_DIR: '{{if eq .ARCH "arm64"}}arm64-v8a{{else}}x86_64{{end}}'
+      TRIPLE: '{{if eq .ARCH "arm64"}}aarch64-linux-android{{else}}x86_64-linux-android{{end}}'
+      # NDK toolchain dir for the build host.
+      HOST_TAG: '{{if eq OS "windows"}}windows-x86_64{{else}}{{if eq OS "darwin"}}darwin-x86_64{{else}}linux-x86_64{{end}}{{end}}'
+      # On Windows the NDK clang drivers are .cmd wrappers; go invokes them fine.
+      CLANG_EXT: '{{if eq OS "windows"}}.cmd{{end}}'
+      BUILD_FLAGS: '{{if eq .PRODUCTION "true"}}-tags production,android -trimpath -buildvcs=false -ldflags="-w -s"{{else}}-tags android,debug -buildvcs=false -gcflags=all="-l"{{end}}'
     cmds:
       - |
-        # Locate the NDK: $ANDROID_NDK_HOME, or the newest installed NDK
+        # Locate the NDK: $ANDROID_NDK_HOME, or the newest installed NDK.
         NDK_ROOT="$ANDROID_NDK_HOME"
         if [ -z "$NDK_ROOT" ]; then
-          SDK_ROOT="{{.SDK_ROOT}}"
-          NDK_ROOT=$(ls -d "$SDK_ROOT"/ndk/* 2>/dev/null | sort -V | tail -1)
+          NDK_ROOT=$(ls -d "{{.SDK_ROOT}}"/ndk/* 2>/dev/null | sort -V | tail -1)
         fi
         if [ -z "$NDK_ROOT" ] || [ ! -d "$NDK_ROOT" ]; then
           echo "Error: Android NDK not found"
@@ -68,45 +79,16 @@ tasks:
           exit 1
         fi
 
-        # Determine toolchain based on host OS
-        case "$(uname -s)" in
-          Darwin) HOST_TAG="darwin-x86_64" ;;
-          Linux)  HOST_TAG="linux-x86_64" ;;
-          *)      echo "Unsupported host OS"; exit 1 ;;
-        esac
-
-        TOOLCHAIN="$NDK_ROOT/toolchains/llvm/prebuilt/$HOST_TAG"
-
-        # Set compiler based on architecture
-        case "{{.ARCH}}" in
-          arm64)
-            export CC="$TOOLCHAIN/bin/aarch64-linux-android{{.MIN_SDK}}-clang"
-            export CXX="$TOOLCHAIN/bin/aarch64-linux-android{{.MIN_SDK}}-clang++"
-            export GOARCH=arm64
-            JNI_DIR="arm64-v8a"
-            ;;
-          amd64|x86_64)
-            export CC="$TOOLCHAIN/bin/x86_64-linux-android{{.MIN_SDK}}-clang"
-            export CXX="$TOOLCHAIN/bin/x86_64-linux-android{{.MIN_SDK}}-clang++"
-            export GOARCH=amd64
-            JNI_DIR="x86_64"
-            ;;
-          *)
-            echo "Unsupported architecture: {{.ARCH}}"
-            exit 1
-            ;;
-        esac
-
+        TOOLCHAIN="$NDK_ROOT/toolchains/llvm/prebuilt/{{.HOST_TAG}}"
+        export CC="$TOOLCHAIN/bin/{{.TRIPLE}}{{.MIN_SDK}}-clang{{.CLANG_EXT}}"
+        export CXX="$TOOLCHAIN/bin/{{.TRIPLE}}{{.MIN_SDK}}-clang++{{.CLANG_EXT}}"
+        export GOARCH={{.GOARCH}}
         export CGO_ENABLED=1
         export GOOS=android
 
-        mkdir -p {{.BIN_DIR}}
-        mkdir -p build/android/app/src/main/jniLibs/$JNI_DIR
-
+        # `go build -o` creates the jniLibs output directory as needed.
         go build -buildmode=c-shared -overlay build/android/overlay.json {{.BUILD_FLAGS}} \
-          -o build/android/app/src/main/jniLibs/$JNI_DIR/libwails.so
-    vars:
-      BUILD_FLAGS: '{{if eq .PRODUCTION "true"}}-tags production,android -trimpath -buildvcs=false -ldflags="-w -s"{{else}}-tags android,debug -buildvcs=false -gcflags=all="-l"{{end}}'
+          -o build/android/app/src/main/jniLibs/{{.JNI_DIR}}/libwails.so
 
   compile:go:all-archs:
     summary: Compile Go code for all Android architectures (fat APK)
@@ -148,14 +130,21 @@ tasks:
       - sh: 'command -v java >/dev/null || [ -n "$JAVA_HOME" ]'
         msg: "Java not found. Install a JDK (e.g. brew install openjdk@21) and/or set JAVA_HOME"
     cmds:
-      - |
-        cd build/android
-        # The exec bit is lost when gradlew is extracted from the embedded
-        # build assets, so restore it before invoking the wrapper.
-        chmod +x ./gradlew
-        ./gradlew assembleDebug
-        cp app/build/outputs/apk/debug/app-debug.apk "../../{{.BIN_DIR}}/{{.APP_NAME}}.apk"
-        echo "APK created: {{.BIN_DIR}}/{{.APP_NAME}}.apk"
+      - cmd: |
+          cmd /c "cd build\android && .\gradlew.bat assembleDebug"
+          powershell -NoProfile -Command "New-Item -ItemType Directory -Force '{{.BIN_DIR}}' | Out-Null; Copy-Item build/android/app/build/outputs/apk/debug/app-debug.apk '{{.BIN_DIR}}/{{.APP_NAME}}.apk' -Force"
+          echo "APK created: {{.BIN_DIR}}/{{.APP_NAME}}.apk"
+        platforms: [windows]
+      - cmd: |
+          cd build/android
+          # The exec bit is lost when gradlew is extracted from the embedded
+          # build assets, so restore it before invoking the wrapper.
+          chmod +x ./gradlew
+          ./gradlew assembleDebug
+          mkdir -p "../../{{.BIN_DIR}}"
+          cp app/build/outputs/apk/debug/app-debug.apk "../../{{.BIN_DIR}}/{{.APP_NAME}}.apk"
+          echo "APK created: {{.BIN_DIR}}/{{.APP_NAME}}.apk"
+        platforms: [linux, darwin]
 
   assemble:apk:release:
     summary: Assembles a release APK using Gradle (signed with the debug keystore unless ANDROID_KEYSTORE_FILE is set)
@@ -163,14 +152,21 @@ tasks:
       - sh: 'command -v java >/dev/null || [ -n "$JAVA_HOME" ]'
         msg: "Java not found. Install a JDK (e.g. brew install openjdk@21) and/or set JAVA_HOME"
     cmds:
-      - |
-        cd build/android
-        # The exec bit is lost when gradlew is extracted from the embedded
-        # build assets, so restore it before invoking the wrapper.
-        chmod +x ./gradlew
-        ./gradlew assembleRelease
-        cp app/build/outputs/apk/release/app-release.apk "../../{{.BIN_DIR}}/{{.APP_NAME}}.apk"
-        echo "Release APK created: {{.BIN_DIR}}/{{.APP_NAME}}.apk"
+      - cmd: |
+          cmd /c "cd build\android && .\gradlew.bat assembleRelease"
+          powershell -NoProfile -Command "New-Item -ItemType Directory -Force '{{.BIN_DIR}}' | Out-Null; Copy-Item build/android/app/build/outputs/apk/release/app-release.apk '{{.BIN_DIR}}/{{.APP_NAME}}.apk' -Force"
+          echo "Release APK created: {{.BIN_DIR}}/{{.APP_NAME}}.apk"
+        platforms: [windows]
+      - cmd: |
+          cd build/android
+          # The exec bit is lost when gradlew is extracted from the embedded
+          # build assets, so restore it before invoking the wrapper.
+          chmod +x ./gradlew
+          ./gradlew assembleRelease
+          mkdir -p "../../{{.BIN_DIR}}"
+          cp app/build/outputs/apk/release/app-release.apk "../../{{.BIN_DIR}}/{{.APP_NAME}}.apk"
+          echo "Release APK created: {{.BIN_DIR}}/{{.APP_NAME}}.apk"
+        platforms: [linux, darwin]
 
   generate:android:overlay:
     internal: true
@@ -205,46 +201,70 @@ tasks:
     summary: Ensure Android Emulator is running
     silent: true
     cmds:
-      - |
-        # Check if an emulator is already running
-        if "{{.ADB}}" devices | grep -q "emulator"; then
-          echo "Emulator already running"
-          exit 0
-        fi
-
-        # Get first available AVD
-        AVD_NAME=$("{{.EMULATOR}}" -list-avds | tail -1)
-        if [ -z "$AVD_NAME" ]; then
-          echo "No Android Virtual Devices found. Create one with:"
-          echo "  avdmanager create avd --name wails --package 'system-images;android-34;google_apis;{{.ANDROID_ABI}}' --device pixel_7"
-          exit 1
-        fi
-
-        echo "Starting emulator: $AVD_NAME"
-        # Start the emulator daemonized so it outlives this task step. go-task's
-        # shell tracks background jobs by PID and reaps them when the command's
-        # interpreter finishes (which nohup/setsid alone don't prevent — the kill
-        # is direct), so a bare `emulator &` is gone before the later
-        # install/launch steps run. Launch it from a short-lived child shell that
-        # backgrounds the emulator and exits immediately: the emulator is then
-        # reparented to init/launchd and go-task's shell has no handle to reap it.
-        nohup sh -c "'{{.EMULATOR}}' -avd '$AVD_NAME' -no-snapshot-load </dev/null >/dev/null 2>&1 &" >/dev/null 2>&1
-
-        # Wait for emulator to boot (max 120 seconds)
-        echo "Waiting for emulator to boot..."
-        "{{.ADB}}" wait-for-device
-
-        for i in $(seq 1 120); do
-          BOOT_COMPLETED=$("{{.ADB}}" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
-          if [ "$BOOT_COMPLETED" = "1" ]; then
-            echo "Emulator booted successfully"
+      - cmd: |
+          powershell -NoProfile -ExecutionPolicy Bypass -Command '
+          $adb = "{{.ADB}}"; if ((-not (Test-Path $adb)) -and (Test-Path "$adb.exe")) { $adb = "$adb.exe" }
+          $emu = "{{.EMULATOR}}"; if ((-not (Test-Path $emu)) -and (Test-Path "$emu.exe")) { $emu = "$emu.exe" }
+          if ((& $adb devices) -match "emulator") { Write-Host "Emulator already running"; exit 0 }
+          $avd = & $emu -list-avds | Select-Object -Last 1
+          if (-not $avd) {
+            Write-Host "No Android Virtual Devices found. Create one with:"
+            Write-Host "  avdmanager create avd --name wails --package ""system-images;android-34;google_apis;{{.ANDROID_ABI}}"" --device pixel_7"
+            exit 1
+          }
+          Write-Host "Starting emulator: $avd"
+          Start-Process -FilePath $emu -ArgumentList "-avd", $avd, "-no-snapshot-load" -WindowStyle Hidden
+          Write-Host "Waiting for emulator to boot..."
+          & $adb wait-for-device
+          for ($i = 0; $i -lt 120; $i++) {
+            $b = (& $adb shell getprop sys.boot_completed) -replace "\s", ""
+            if ($b -eq "1") { Write-Host "Emulator booted successfully"; exit 0 }
+            Start-Sleep -Seconds 1
+          }
+          Write-Host "Emulator boot timeout"; exit 1
+          '
+        platforms: [windows]
+      - cmd: |
+          # Check if an emulator is already running
+          if "{{.ADB}}" devices | grep -q "emulator"; then
+            echo "Emulator already running"
             exit 0
           fi
-          sleep 1
-        done
 
-        echo "Emulator boot timeout"
-        exit 1
+          # Get first available AVD
+          AVD_NAME=$("{{.EMULATOR}}" -list-avds | tail -1)
+          if [ -z "$AVD_NAME" ]; then
+            echo "No Android Virtual Devices found. Create one with:"
+            echo "  avdmanager create avd --name wails --package 'system-images;android-34;google_apis;{{.ANDROID_ABI}}' --device pixel_7"
+            exit 1
+          fi
+
+          echo "Starting emulator: $AVD_NAME"
+          # Start the emulator daemonized so it outlives this task step. go-task's
+          # shell tracks background jobs by PID and reaps them when the command's
+          # interpreter finishes (which nohup/setsid alone don't prevent — the kill
+          # is direct), so a bare `emulator &` is gone before the later
+          # install/launch steps run. Launch it from a short-lived child shell that
+          # backgrounds the emulator and exits immediately: the emulator is then
+          # reparented to init/launchd and go-task's shell has no handle to reap it.
+          nohup sh -c "'{{.EMULATOR}}' -avd '$AVD_NAME' -no-snapshot-load </dev/null >/dev/null 2>&1 &" >/dev/null 2>&1
+
+          # Wait for emulator to boot (max 120 seconds)
+          echo "Waiting for emulator to boot..."
+          "{{.ADB}}" wait-for-device
+
+          for i in $(seq 1 120); do
+            BOOT_COMPLETED=$("{{.ADB}}" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
+            if [ "$BOOT_COMPLETED" = "1" ]; then
+              echo "Emulator booted successfully"
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "Emulator boot timeout"
+          exit 1
+        platforms: [linux, darwin]
     preconditions:
       - sh: '[ -x "{{.ADB}}" ] || command -v adb'
         msg: "adb not found. Install the Android SDK platform-tools (or set ANDROID_HOME)"
@@ -274,7 +294,10 @@ tasks:
   logs:
     summary: Stream Android logcat filtered to this app
     cmds:
-      - '"{{.ADB}}" logcat -v time | grep -E "(Wails|{{.APP_NAME}})" || true'
+      - cmd: '"{{.ADB}}" logcat -v time | findstr /R "Wails {{.APP_NAME}}"'
+        platforms: [windows]
+      - cmd: '"{{.ADB}}" logcat -v time | grep -E "(Wails|{{.APP_NAME}})" || true'
+        platforms: [linux, darwin]
 
   logs:all:
     summary: Stream all Android logcat (verbose)
@@ -284,7 +307,12 @@ tasks:
   clean:
     summary: Clean build artifacts
     cmds:
-      - rm -rf {{.BIN_DIR}}
-      - rm -rf build/android/app/build
-      - rm -rf build/android/app/src/main/jniLibs/*/libwails.so
-      - rm -rf build/android/.gradle
+      - cmd: |
+          powershell -NoProfile -Command "foreach ($p in '{{.BIN_DIR}}','build/android/app/build','build/android/.gradle') { if (Test-Path $p) { Remove-Item -Recurse -Force $p } }; Get-ChildItem -Path build/android/app/src/main/jniLibs -Filter libwails.so -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force"
+        platforms: [windows]
+      - cmd: |
+          rm -rf {{.BIN_DIR}}
+          rm -rf build/android/app/build
+          rm -rf build/android/app/src/main/jniLibs/*/libwails.so
+          rm -rf build/android/.gradle
+        platforms: [linux, darwin]

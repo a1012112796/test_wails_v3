@@ -12,3 +12,8 @@ build/android/gen/
 build/darwin/icons.icns
 build/windows/icon.ico
 frontend/bindings/
+build/android/.gradle/
+build/android/build
+# Android signing keystore (secret — keep out of git, back it up safely)
+*.keystore
+*.jks

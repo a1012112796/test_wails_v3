@@ -10,7 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@wailsio/runtime": "latest",
+    "@wailsio/runtime": "file:../../wails/v3/internal/runtime/desktop/@wailsio/runtime",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
   },

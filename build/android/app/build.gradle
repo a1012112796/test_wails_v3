@@ -72,6 +72,13 @@ android {
         doNotStrip '*/arm64-v8a/libwails.so'
         doNotStrip '*/x86_64/libwails.so'
     }
+
+    lint {
+        // Don't gate release assembly on the lint-vital pass: it pulls extra
+        // lint artifacts over the network at build time (which can be blocked,
+        // e.g. HTTP 403), and a failed/unavailable lint shouldn't stop signing.
+        checkReleaseBuilds false
+    }
 }
 
 dependencies {
