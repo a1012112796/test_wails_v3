@@ -22,16 +22,7 @@ jobs:
       #    `../wails/v3` resolves. Cloned manually because the URL/branch come
       #    from secrets and may point at a private fork.
       - name: Checkout Wails source (sibling ../wails)
-        run: |
-          echo "Cloning wails from: ${{ secrets.WAILS_SRC_URL }}"
-          echo "Branch: ${{ secrets.WAILS_SRC_BRANCH }}"
-          git clone --depth 1 --branch "${{ secrets.WAILS_SRC_BRANCH }}" "${{ secrets.WAILS_SRC_URL }}" wails || {
-            echo "ERROR: Failed to clone wails. Check:"
-            echo "  - WAILS_SRC_URL secret (URL must include auth token if private: https://x-access-token:<PAT>@...)"
-            echo "  - WAILS_SRC_BRANCH secret (branch must exist)"
-            exit 1
-          }
-          echo "✓ Wails source cloned"
+        run: git clone --depth 1 --branch "${{ secrets.WAILS_SRC_BRANCH }}" "${{ secrets.WAILS_SRC_URL }}" wails
 
       # 3. Prepare the build environment: Go, Node, JDK, Android SDK + NDK,
       #    the wails3 CLI (built from the checked-out source) and the local
@@ -74,11 +65,7 @@ jobs:
       - name: Install wails3 CLI
         working-directory: wails/v3
         run: |
-          echo "Building wails3 CLI..."
-          go install ./cmd/wails3 || {
-            echo "ERROR: Failed to build wails3 CLI"
-            exit 1
-          }
+          go install ./cmd/wails3
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Build @wailsio/runtime (local fork the frontend links to)
@@ -100,26 +87,7 @@ jobs:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: |
-          echo "Starting APK build (package:fat = arm64-v8a + x86_64)..."
-          wails3 task android:package:fat || {
-            echo "ERROR: Failed to build APK"
-            exit 1
-          }
-
-      - name: Verify APK signature
-        working-directory: dev-tools
-        run: |
-          if [ ! -f "bin/dev-tools.apk" ]; then
-            echo "ERROR: APK not found at bin/dev-tools.apk"
-            exit 1
-          fi
-          echo "Verifying APK signature..."
-          apksigner verify --verbose --print-certs bin/dev-tools.apk || {
-            echo "ERROR: APK signature verification failed"
-            exit 1
-          }
-          echo "✓ APK signature verified"
+        run: wails3 task android:package:fat
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v6
