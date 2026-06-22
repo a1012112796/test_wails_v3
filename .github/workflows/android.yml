@@ -1,0 +1,89 @@
+name: Build Android APK
+
+# Step 0: trigger on every push (plus manual runs).
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. Check out this repository into a subdirectory. It must NOT sit at the
+      #    workspace root, because go.mod has `replace ... => ../wails/v3` and the
+      #    frontend depends on `file:../../wails/v3/...`; both need the wails
+      #    source as a sibling directory.
+      - name: Checkout dev-tools
+        uses: actions/checkout@v4
+        with:
+          path: dev-tools
+
+      # 2. Check out the Wails source one level up (a sibling of dev-tools), so
+      #    `../wails/v3` resolves. Cloned manually because the URL/branch come
+      #    from secrets and may point at a private fork.
+      - name: Checkout Wails source (sibling ../wails)
+        run: git clone --depth 1 --branch "${{ secrets.WAILS_SRC_BRANCH }}" "${{ secrets.WAILS_SRC_URL }}" wails
+
+      # 3. Prepare the build environment: Go, Node, JDK, Android SDK + NDK,
+      #    the wails3 CLI (built from the checked-out source) and the local
+      #    @wailsio/runtime build the frontend links against.
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: dev-tools/go.mod
+          cache-dependency-path: dev-tools/go.sum
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages + NDK
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;26.3.11579264"
+          # Pin the NDK for the build tasks (they otherwise auto-discover it).
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.3.11579264" >> "$GITHUB_ENV"
+
+      - name: Install wails3 CLI
+        working-directory: wails/v3
+        run: |
+          go install ./cmd/wails3
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Build @wailsio/runtime (local fork the frontend links to)
+        working-directory: wails/v3/internal/runtime/desktop/@wailsio/runtime
+        run: |
+          npm install
+          npm run build:code
+
+      # 4. Restore the signing keystore from the base64 secret into the repo root.
+      - name: Restore signing keystore
+        working-directory: dev-tools
+        run: echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > dev-tools.keystore
+
+      # 5. Build the signed (fat: arm64-v8a + x86_64) release APK, then publish it.
+      - name: Build signed APK
+        working-directory: dev-tools
+        env:
+          ANDROID_KEYSTORE_FILE: ${{ github.workspace }}/dev-tools/dev-tools.keystore
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: wails3 task android:package:fat
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-tools-apk
+          path: dev-tools/bin/*.apk
+          if-no-files-found: error
