@@ -44,6 +44,9 @@ jobs:
           distribution: temurin
           java-version: '21'
 
+      - name: Install Linux system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev
+
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
